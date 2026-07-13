@@ -22,10 +22,10 @@ pub const Address = struct {
         assert(hexStr[1] == 'x');
 
         if (hexStr.len == 0) {
-            return AddressParserError.EmptyInput;
+            return AddressParseError.EmptyInput;
         }
         if (hexStr.len > 66) {
-            return AddressParserError.InputTooLong;
+            return AddressParseError.InputTooLong;
         }
 
         _ = std.fmt.hexToBytes(self.bytes[0..], hexStr[2..]) catch |err| {
@@ -45,7 +45,7 @@ pub const Address = struct {
     }
 };
 
-pub const AddressParserError = error{ EmptyInput, InputTooLong, InvalidHexCharacter };
+pub const AddressParseError = error{ EmptyInput, InputTooLong, InvalidHexCharacter };
 
 pub const ByteString = []u8;
 pub const Identifier = struct {
@@ -67,14 +67,18 @@ pub const GasCostSummary = struct {
 
 pub const Version = u64;
 
-pub const TypeTag = enum {
-    U8,
-    U16,
-    U32,
-    U64,
-    U128,
-    U256,
-    Bool,
+pub const TypeTag = union(enum) {
+    u8,
+    u16,
+    u32,
+    u64,
+    u128,
+    u256,
+    bool,
+    address,
+    signer,
+    vector: *TypeTag,
+    struct_: *StructTag,
 };
 
 pub const StructTag = struct {
@@ -102,25 +106,36 @@ pub const UpgradeInfo = struct {
     upgraded_version: Version,
 };
 
+pub const IdentifierContext = struct {
+    pub fn hash(self: @This(), id: Identifier) u64 {
+        _ = self;
+        return std.hash.Wyhash.hash(0, id.bytestring);
+    }
+    pub fn eql(self: @This(), a: Identifier, b: Identifier) bool {
+        _ = self;
+        return std.mem.eql(u8, a.bytestring, b.bytestring);
+    }
+};
+
 pub const MovePackage = struct {
     id: Address,
     version: Version,
-    modules: std.AutoHashMap(Identifier, std.ArrayList(u8)),
+    modules: std.HashMap(Identifier, std.ArrayList(u8), IdentifierContext, std.hash_map.default_max_load_percentage),
     type_origin_table: std.ArrayList(TypeOrigin),
     linkage_table: std.AutoHashMap(Address, UpgradeInfo),
 };
 
-pub const ObjectData = enum(type) {
-    struct_ = MoveStruct,
-    package = MovePackage,
+pub const ObjectData = union(enum) {
+    struct_: MoveStruct,
+    package: MovePackage,
 };
 
-pub const Owner = enum(type) {
-    address = Address,
-    object = Address,
-    shared = Version,
+pub const Owner = union(enum) {
+    address: Address,
+    object: Address,
+    shared: Version,
     immutable,
-    consensus_address = struct {
+    consensus_address: struct {
         start_version: Version,
         owner: Address,
     },
@@ -151,11 +166,11 @@ pub const SharedInput = struct {
     mutability: Mutability,
 };
 
-pub const Reservation = enum(u64) {
-    Amount,
+pub const Reservation = union(enum) {
+    Amount: u64,
 };
-pub const WithdrawalType = enum(type) {
-    Balance = TypeTag,
+pub const WithdrawalType = union(enum) {
+    Balance: TypeTag,
 };
 pub const WithdrawFrom = enum {
     Sender,
@@ -168,11 +183,11 @@ pub const FundsWithdrawal = struct {
     source: WithdrawFrom,
 };
 
-pub const Argument = enum(type) {
+pub const Argument = union(enum) {
     Gas,
-    Input = u16,
-    Result = u16,
-    NestedResult = struct { a: u16, b: u16 },
+    Input: u16,
+    Result: u16,
+    NestedResult: struct { a: u16, b: u16 },
 };
 
 pub const MoveCall = struct {
@@ -214,22 +229,22 @@ pub const Upgrade = struct {
     ticket: Argument,
 };
 
-pub const Command = enum(type) {
-    MoveCall = MoveCall,
-    TransferObjects = TransferObjects,
-    SplitCoins = SplitCoins,
-    MergeCoins = MergeCoins,
-    Publish = Publish,
-    MakeMoveVector = MakeMoveVector,
-    Upgrade = Upgrade,
+pub const Command = union(enum) {
+    MoveCall: MoveCall,
+    TransferObjects: TransferObjects,
+    SplitCoins: SplitCoins,
+    MergeCoins: MergeCoins,
+    Publish: Publish,
+    MakeMoveVector: MakeMoveVector,
+    Upgrade: Upgrade,
 };
 
-pub const Input = enum(type) {
-    Pure = std.ArrayList(u8),
-    ImmutableOrOwned = ObjectReference,
-    Shared = SharedInput,
-    Receiving = ObjectReference,
-    FundsWithdrawal = FundsWithdrawal,
+pub const Input = union(enum) {
+    Pure: std.ArrayList(u8),
+    ImmutableOrOwned: ObjectReference,
+    Shared: SharedInput,
+    Receiving: ObjectReference,
+    FundsWithdrawal: FundsWithdrawal,
 };
 
 pub const ProgrammableTransaction = struct {
@@ -265,11 +280,11 @@ pub const GenesisTransaction = struct {
     objects: std.ArrayList(GenesisObject),
 };
 
-pub const CheckPointTimeStamp = u64;
+pub const CheckpointTimestamp = u64;
 pub const ConsensusCommitPrologue = struct {
     epoch: u64,
     round: u64,
-    commit_timestamp_ms: CheckPointTimeStamp,
+    commit_timestamp_ms: CheckpointTimestamp,
 };
 
 pub const JwkId = struct {
@@ -302,8 +317,8 @@ pub const AuthenticatorStateExpired = struct {
     authenticator_object_initial_shared_version: u64,
 };
 
-pub const ExecutionTimeObservationKey = enum(type) {
-    MoveEntryPoint = struct {
+pub const ExecutionTimeObservationKey = union(enum) {
+    MoveEntryPoint: struct {
         package: Address,
         module: []const u8,
         function: []const u8,
@@ -318,24 +333,24 @@ pub const ValidatorExecutionTimeObservation = struct {
     duration: std.Io.Duration,
 };
 
-pub const ExecutionTimeObservations = enum(type) {
-    V1 = std.ArrayList(struct { ExecutionTimeObservationKey, std.ArrayList(ValidatorExecutionTimeObservation) }),
+pub const ExecutionTimeObservations = union(enum) {
+    V1: std.ArrayList(struct { ExecutionTimeObservationKey, std.ArrayList(ValidatorExecutionTimeObservation) }),
 };
 
-pub const EndOfEpochTransactionKind = enum(type) {
-    ChangeEpoch = ChangeEpoch,
+pub const EndOfEpochTransactionKind = union(enum) {
+    ChangeEpoch: ChangeEpoch,
     AuthenticatorStateCreator,
-    AuthenticatorStateExpired = AuthenticatorStateExpired,
+    AuthenticatorStateExpired: AuthenticatorStateExpired,
     RandomnessStateCreate,
     DenyListStateCreate,
-    BridgeStateCreate = struct { chain_id: Digest },
-    BridgeCommitteeInit = struct { bridge_object_version: u64 },
-    StoreExecutionTimeObservations = ExecutionTimeObservations,
+    BridgeStateCreate: struct { chain_id: Digest },
+    BridgeCommitteeInit: struct { bridge_object_version: u64 },
+    StoreExecutionTimeObservations: ExecutionTimeObservations,
     AccumulatorRootCreate,
     CoinRegistryCreate,
     DisplayRegistryCreate,
     AddressAliasStateCreate,
-    WriteAccumulatorStorageCost = struct { storage_cost: u64 },
+    WriteAccumulatorStorageCost: struct { storage_cost: u64 },
 };
 
 pub const RandomnessStateUpdate = struct {
@@ -344,7 +359,6 @@ pub const RandomnessStateUpdate = struct {
     random_bytes: std.ArrayList(u8),
     randomness_obj_initial_shared_version: u64,
 };
-pub const CheckpointTimestamp = u64;
 
 pub const ConsensusCommitPrologueV2 = struct {
     epoch: u64,
@@ -370,9 +384,9 @@ pub const CanceledTransactionV2 = struct {
     vector_assignements: std.ArrayList(VersionAssignmentV2),
 };
 
-pub const ConsensusDeterminedVersionAssignments = enum(type) {
-    CanceledTransactions = struct { canceled_transactions: std.ArrayList(CanceledTransaction) },
-    CanceledTransactionsV2 = struct { canceled_transactions: std.ArrayList(CanceledTransactionV2) },
+pub const ConsensusDeterminedVersionAssignments = union(enum) {
+    CanceledTransactions: struct { canceled_transactions: std.ArrayList(CanceledTransaction) },
+    CanceledTransactionsV2: struct { canceled_transactions: std.ArrayList(CanceledTransactionV2) },
 };
 pub const ConsensusCommitPrologueV3 = struct {
     epoch: u64,
@@ -392,24 +406,24 @@ pub const ConsensusCommitPrologueV4 = struct {
     additional_state_digest: Digest,
 };
 
-pub const TransactionKind = enum(type) {
-    ProgrammableTransaction = ProgrammableTransaction,
-    ChangeEpoch = ChangeEpoch,
-    Genesis = GenesisTransaction,
-    ConsensusCommitPrologue = ConsensusCommitPrologue,
-    AuthenticatorStateUpdate = AuthenticatorStateUpdate,
-    EndOfEpoch = std.ArrayList(EndOfEpochTransactionKind),
-    RandomnessStateUpdate = RandomnessStateUpdate,
-    ConsensusCommitPrologueV2 = ConsensusCommitPrologueV2,
-    ConsensusCommitPrologueV3 = ConsensusCommitPrologueV3,
-    ConsensusCommitPrologueV4 = ConsensusCommitPrologueV4,
-    ProgrammableSystemTransaction = ProgrammableTransaction,
+pub const TransactionKind = union(enum) {
+    ProgrammableTransaction: ProgrammableTransaction,
+    ChangeEpoch: ChangeEpoch,
+    Genesis: GenesisTransaction,
+    ConsensusCommitPrologue: ConsensusCommitPrologue,
+    AuthenticatorStateUpdate: AuthenticatorStateUpdate,
+    EndOfEpoch: std.ArrayList(EndOfEpochTransactionKind),
+    RandomnessStateUpdate: RandomnessStateUpdate,
+    ConsensusCommitPrologueV2: ConsensusCommitPrologueV2,
+    ConsensusCommitPrologueV3: ConsensusCommitPrologueV3,
+    ConsensusCommitPrologueV4: ConsensusCommitPrologueV4,
+    ProgrammableSystemTransaction: ProgrammableTransaction,
 };
 
-pub const TransactionExpiration = enum(type) {
+pub const TransactionExpiration = union(enum) {
     None,
-    Epoch = EpochId,
-    ValidDuring = struct {
+    Epoch: EpochId,
+    ValidDuring: struct {
         min_epoch: ?EpochId,
         max_epoch: ?EpochId,
         min_timestamp: ?u64,
@@ -440,16 +454,16 @@ pub const Secp256k1PublicKey = [33]u8;
 pub const Secp256r1Signature = [64]u8;
 pub const Secp256r1PublicKey = [33]u8;
 
-pub const SimpleSignature = enum(type) {
-    Ed25519 = struct {
+pub const SimpleSignature = union(enum) {
+    Ed25519: struct {
         signature: Ed25519Signature,
         public_key: Ed25519PublicKey,
     },
-    Secp256k1 = struct {
+    Secp256k1: struct {
         signature: Secp256k1Signature,
         public_key: Secp256k1PublicKey,
     },
-    Secp256r1 = struct {
+    Secp256r1: struct {
         signature: Secp256r1Signature,
         public_key: Secp256r1PublicKey,
     },
@@ -499,12 +513,12 @@ pub const PasskeyAuthenticator = struct {
     client_data_json: []const u8,
 };
 
-pub const MultisigMemberSignature = enum(type) {
-    Ed25519 = Ed25519Signature,
-    Secp256k1 = Secp256k1Signature,
-    Secp256r1 = Secp256r1Signature,
-    ZkLogin = std.ArrayList(ZkLoginAuthenticator),
-    Passkey = PasskeyAuthenticator,
+pub const MultisigMemberSignature = union(enum) {
+    Ed25519: Ed25519Signature,
+    Secp256k1: Secp256k1Signature,
+    Secp256r1: Secp256r1Signature,
+    ZkLogin: ZkLoginAuthenticator,
+    Passkey: PasskeyAuthenticator,
 };
 pub const BitmapUnit = u16;
 pub const Bitmap = zroaring.Bitmap;
@@ -517,12 +531,12 @@ pub const ZkLoginPublicIdentifier = struct {
 
 pub const PasskeyPublicKey = Secp256r1PublicKey;
 
-pub const MultisigMemberPublicKey = enum(type) {
-    Ed25519 = Ed25519PublicKey,
-    Secp256k1 = Secp256k1PublicKey,
-    Secp256r1 = Secp256r1PublicKey,
-    ZkLogin = ZkLoginPublicIdentifier,
-    Passkey = PasskeyPublicKey,
+pub const MultisigMemberPublicKey = union(enum) {
+    Ed25519: Ed25519PublicKey,
+    Secp256k1: Secp256k1PublicKey,
+    Secp256r1: Secp256r1PublicKey,
+    ZkLogin: ZkLoginPublicIdentifier,
+    Passkey: PasskeyPublicKey,
 };
 
 pub const WeightUnit = u8;
@@ -545,11 +559,11 @@ pub const MultisigAggregatedSignature = struct {
     committee: MultisigCommittee,
 };
 
-pub const UserSignature = enum(type) {
-    Simple = SimpleSignature,
-    Multisig = MultisigAggregatedSignature,
-    ZkLogin = std.ArrayList(ZkLoginAuthenticator),
-    Passkey = PasskeyAuthenticator,
+pub const UserSignature = union(enum) {
+    Simple: SimpleSignature,
+    Multisig: MultisigAggregatedSignature,
+    ZkLogin: ZkLoginAuthenticator,
+    Passkey: PasskeyAuthenticator,
 };
 
 pub const SignedTransaction = struct {
@@ -565,14 +579,14 @@ pub const MoveLocation = struct {
     function_name: ?Identifier,
 };
 
-pub const CommandArgumentError = enum(type) {
+pub const CommandArgumentError = union(enum) {
     TypeMismatch,
     InvalidBcsBytes,
     InvalidUsageOfPureArgument,
     InvalidArgumentToPrivateEntryFunction,
-    IndexOutOfBounds = struct { index: u16 },
-    SecondaryIndexOutOfBounds = struct { result: u16, subresult: u16 },
-    InvalidResultArity = struct { result: u16 },
+    IndexOutOfBounds: struct { index: u16 },
+    SecondaryIndexOutOfBounds: struct { result: u16, subresult: u16 },
+    InvalidResultArity: struct { result: u16 },
     InvalidGasCoinUsage,
     InvalidValueUsage,
     InvalidObjectByValue,
@@ -592,60 +606,60 @@ pub const TypeArgumentError = enum {
     ConstraintNotSatisfied,
 };
 
-pub const PackageUpgradeError = enum(type) {
-    UnableToFetchPackage = struct { package_id: Address },
-    NotAPackage = struct { object_id: Address },
+pub const PackageUpgradeError = union(enum) {
+    UnableToFetchPackage: struct { package_id: Address },
+    NotAPackage: struct { object_id: Address },
     IncompatibleUpgrade,
-    DigestDoesNotMatch = struct { digest: Digest },
-    UnknownUpgradePolicy = struct { policy: u8 },
-    PackageIdDoesNotMatch = struct {
+    DigestDoesNotMatch: struct { digest: Digest },
+    UnknownUpgradePolicy: struct { policy: u8 },
+    PackageIdDoesNotMatch: struct {
         package_id: Address,
         ticket_id: Address,
     },
 };
 
-pub const ExecutionError = enum(type) {
+pub const ExecutionError = union(enum) {
     InsufficientGas,
     InvalidGasObject,
     InvariantViolation,
     FeatureNotYetSupported,
-    ObjectTooBig = struct {
+    ObjectTooBig: struct {
         object_size: u64,
         max_object_size: u64,
     },
-    PackageTooBig = struct {
+    PackageTooBig: struct {
         object_size: u64,
         max_object_size: u64,
     },
-    CircularObjectOwnership = struct { object: Address },
+    CircularObjectOwnership: struct { object: Address },
     InsufficientCoinBalance,
     CoinBalanceOverflow,
     PublishErrorNonZeroAddress,
     SuiMoveVerificationError,
-    MovePrimitiveRuntimeError = struct { location: ?MoveLocation },
-    MoveAbort = struct { location: MoveLocation, code: u64 },
+    MovePrimitiveRuntimeError: struct { location: ?MoveLocation },
+    MoveAbort: struct { location: MoveLocation, code: u64 },
     VmVerificationOrDeserializationError,
     VmInvariantViolation,
     FunctionNotFound,
     ArityMismatch,
     TypeArityMismatch,
     NonEntryFunctionInvoked,
-    CommandArgumentError = struct {
+    CommandArgumentError: struct {
         argument: u16,
         kind: CommandArgumentError,
     },
-    TypeArgumentError = struct {
+    TypeArgumentError: struct {
         type_argument: u16,
         kind: TypeArgumentError,
     },
-    UnusedValueWithoutDrop = struct { result: u16, subresult: u16 },
-    InvalidPublicFunctionReturnType = struct { index: u16 },
+    UnusedValueWithoutDrop: struct { result: u16, subresult: u16 },
+    InvalidPublicFunctionReturnType: struct { index: u16 },
     InvalidTransferObject,
-    EffectsTooLarge = struct { current_size: u64, max_size: u64 },
+    EffectsTooLarge: struct { current_size: u64, max_size: u64 },
     PublishUpgradeMissingDependency,
     PublishUpgradeDependencyDowngrade,
-    PackageUpgradeError = struct { kind: PackageUpgradeError },
-    WrittenObjectsTooLarge = struct {
+    PackageUpgradeError: struct { kind: PackageUpgradeError },
+    WrittenObjectsTooLarge: struct {
         object_size: u64,
         max_object_size: u64,
     },
@@ -653,28 +667,28 @@ pub const ExecutionError = enum(type) {
     SuiMoveVerificationTimedout,
     ConsensusObjectOperationNotAllowed,
     InputObjectDeleted,
-    ExecutionCanceledDueToConsensusObjectCongestion = struct {
+    ExecutionCanceledDueToConsensusObjectCongestion: struct {
         congested_objects: std.ArrayList(Address),
     },
-    AddressDeniedForCoin = struct { address: Address, coin_type: []const u8 },
-    CoinTypeGlobalPause = struct { coin_type: []const u8 },
+    AddressDeniedForCoin: struct { address: Address, coin_type: []const u8 },
+    CoinTypeGlobalPause: struct { coin_type: []const u8 },
     ExecutionCanceledDueToRandomnessUnavailable,
-    MoveVectorElemTooBig = struct {
+    MoveVectorElemTooBig: struct {
         value_size: u64,
         max_scaled_size: u64,
     },
-    MoveRawValueTooBig = struct {
+    MoveRawValueTooBig: struct {
         value_size: u64,
         max_scaled_size: u64,
     },
     InvalidLinkage,
     InsufficientFundsForWithdraw,
-    NonExclusiveWriteInputObjectModified = struct { object: Address },
+    NonExclusiveWriteInputObjectModified: struct { object: Address },
 };
 
-pub const ExecutionStatus = enum(type) {
+pub const ExecutionStatus = union(enum) {
     Success,
-    Failure = struct {
+    Failure: struct {
         error_: ExecutionError,
         command: ?u64,
     },
@@ -708,9 +722,9 @@ pub const TransactionEffectsV1 = struct {
     dependencies: std.ArrayList(Digest),
 };
 
-pub const ObjectIn = enum(type) {
+pub const ObjectIn = union(enum) {
     NotExist,
-    Exist = struct {
+    Exist: struct {
         version: Version,
         digest: Digest,
         owner: Owner,
@@ -721,12 +735,12 @@ pub const AccumulatorOperation = enum {
     Merge,
     Split,
 };
-pub const AccumulatorValue = enum(type) {
-    Integer = u64,
+pub const AccumulatorValue = union(enum) {
+    Integer: u64,
 
-    IntegerTuple = .{ u64, u64 },
+    IntegerTuple: struct { u64, u64 },
 
-    EventDigest = std.ArrayList(.{ u64, Digest }),
+    EventDigest: std.ArrayList(struct { u64, Digest }),
 };
 
 pub const AccumulatorWrite = struct {
@@ -736,11 +750,11 @@ pub const AccumulatorWrite = struct {
     value: AccumulatorValue,
 };
 
-pub const ObjectOut = enum(type) {
+pub const ObjectOut = union(enum) {
     NotExist,
-    ObjectWrite = struct { digest: Digest, owner: Owner },
-    PackageWrite = struct { version: Version, digest: Digest },
-    AccumulatorWrite = AccumulatorWrite,
+    ObjectWrite: struct { digest: Digest, owner: Owner },
+    PackageWrite: struct { version: Version, digest: Digest },
+    AccumulatorWrite: AccumulatorWrite,
 };
 
 pub const IdOperation = enum {
@@ -756,11 +770,11 @@ pub const ChangedObject = struct {
     id_operation: IdOperation,
 };
 
-pub const UnchangedConsensusKind = enum(type) {
-    ReadOnlyRoot = struct { version: Version, digest: Digest },
-    MutateDeleted = struct { version: Version },
-    ReadDeleted = struct { version: Version },
-    Canceled = struct { version: Version },
+pub const UnchangedConsensusKind = union(enum) {
+    ReadOnlyRoot: struct { version: Version, digest: Digest },
+    MutateDeleted: struct { version: Version },
+    ReadDeleted: struct { version: Version },
+    Canceled: struct { version: Version },
     PerEpochConfig,
 };
 
@@ -783,9 +797,9 @@ pub const TransactionEffectsV2 = struct {
     auxiliary_data_digest: ?Digest,
 };
 
-pub const TransactionEffects = enum(type) {
-    V1 = std.ArrayList(TransactionEffectsV1),
-    V2 = std.ArrayList(TransactionEffectsV2),
+pub const TransactionEffects = union(enum) {
+    V1: TransactionEffectsV1,
+    V2: TransactionEffectsV2,
 };
 
 pub const Event = struct {
@@ -826,15 +840,15 @@ pub const Coin = struct {
 
 pub const Hasher = std.crypto.hash.blake2.Blake2b256;
 
-pub const CheckpointCommitment = enum(type) {
-    EcmhLiveObjectSet = struct { digest: Digest },
-    CheckpointArtifacts = struct { digest: Digest },
+pub const CheckpointCommitment = union(enum) {
+    EcmhLiveObjectSet: struct { digest: Digest },
+    CheckpointArtifacts: struct { digest: Digest },
 };
 
 pub const CheckpointTransactionInfo = struct {
     transaction: Digest,
     effects: Digest,
-    signatures: std.ArrayList(.{ UserSignature, ?u64 }),
+    signatures: std.ArrayList(struct { UserSignature, ?u64 }),
 };
 
 pub const CheckpointContents = struct {
@@ -911,10 +925,97 @@ pub const Intent = struct {
 };
 
 pub const InvalidZkLoginAuthenticatorError = []const u8;
-pub const DigestParseError = error{};
+pub const DigestParseError = struct {
+    bs58_error: ?[]const u8,
+};
 pub const SigningDigest = [32]u8;
 
 pub const SignedTransactionWithIntentMessage = struct {};
+
+pub const ObjectType = union(enum) {
+    Package,
+    Struct: StructTag,
+};
+
+pub const PersonalMessage = std.ArrayList(u8);
+pub const Bn254FieldElementParseError = error{
+    Empty,
+    InvalidDigit,
+    PosOverflow,
+    NegOverflow,
+    Zero,
+};
+
+pub const ValidatorCommittee = struct {
+    epoch: EpochId,
+    members: std.ArrayList(ValidatorCommitteeMember),
+};
+
+pub const ValidatorSignature = struct {
+    epoch: EpochId,
+    public_key: Bls12381PublicKey,
+    signature: Bls12381Signature,
+};
+
+pub const TypeParseError = struct {
+    source: []const u8,
+    message: ?[]const u8,
+};
+
+pub const SignatureScheme = enum(u8) {
+    Ed25519 = 0x00,
+    Secp256k1 = 0x01,
+    Secp256r1 = 0x02,
+    Multisig = 0x03,
+    Bls12381 = 0x04, // This is currently not supported for user addresses
+    ZkLogin = 0x05,
+    Passkey = 0x06,
+};
+
+pub const InvalidSignatureScheme = u8;
+
+const DerivedAddressIter = struct {
+    primary: ?Address,
+    extra: ?Address,
+};
+
+const HashingIntent = enum(u8) {
+    ChildObjectId = 0xf0,
+    RegularObjectId = 0xf1,
+};
+
+const SerializedTypeTagVariant = enum(usize) {
+    Bool = 0,
+    U8 = 1,
+    U64 = 2,
+    U128 = 3,
+    Address = 4,
+    Signer = 5,
+    Vector = 6,
+    Struct = 7,
+    U16 = 8,
+    U32 = 9,
+    U256 = 10,
+};
+
+const TypeTagVisitor = struct {};
+
+const BinaryStructTagRef = struct {
+    address: Address,
+    module: Identifier,
+    name: Identifier,
+    type_params: TypeTag,
+};
+
+const BinaryStructTag = struct {
+    address: Address,
+    module: Identifier,
+    name: Identifier,
+    type_params: std.ArrayList(TypeTag),
+};
+
+const ReadableAddress = struct {};
+const ReadableDigest = struct {};
 
 test "Address" {
     var address = Address.new();
