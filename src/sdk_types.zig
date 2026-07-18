@@ -261,17 +261,54 @@ pub const MoveStruct = struct {
     has_public_transfer: bool,
     version: Version,
     contents: std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+
+    pub fn init(type_: StructTag, has_public_transfer: bool, version: Version, allocator: std.mem.Allocator) MoveStruct {
+        return MoveStruct{
+            .type_ = type_,
+            .has_public_transfer = has_public_transfer,
+            .version = version,
+            .contents = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn add(self: *MoveStruct, items: []const u8) !void {
+        try self.contents.appendSlice(self.allocator, items);
+    }
+
+    pub fn deinit(self: *MoveStruct) void {
+        self.contents.deinit(self.allocator);
+        self.type_.deinit();
+    }
 };
 
 pub const TypeOrigin = struct {
     module_name: Identifier,
     struct_name: Identifier,
     package: Address,
+    allocator: std.mem.Allocator,
+
+    pub fn init(module_name: Identifier, struct_name: Identifier, package: Address, allocator: std.mem.Allocator) TypeOrigin {
+        return TypeOrigin{ .module_name = module_name, .struct_name = struct_name, .package = package, .allocator = allocator };
+    }
+
+    pub fn deinit(self: *TypeOrigin) void {
+        self.module_name.deinit(self.allocator);
+        self.struct_name.deinit(self.allocator);
+    }
 };
 
 pub const UpgradeInfo = struct {
     upgraded_id: Address,
     upgraded_version: Version,
+
+    pub fn new(upgraded_id: Address, upgraded_version: Version) UpgradeInfo {
+        return UpgradeInfo{
+            .upgraded_id = upgraded_id,
+            .upgraded_version = upgraded_version,
+        };
+    }
 };
 
 pub const IdentifierContext = struct {
@@ -291,6 +328,55 @@ pub const MovePackage = struct {
     modules: std.HashMap(Identifier, std.ArrayList(u8), IdentifierContext, std.hash_map.default_max_load_percentage),
     type_origin_table: std.ArrayList(TypeOrigin),
     linkage_table: std.AutoHashMap(Address, UpgradeInfo),
+    allocator: std.mem.Allocator,
+
+    pub fn init(id: Address, version: Version, allocator: std.mem.Allocator) MovePackage {
+        const modules = std.HashMap(Identifier, std.ArrayList(u8), IdentifierContext, std.hash_map.default_max_load_percentage).init(allocator);
+        const linkage_table = std.AutoHashMap(Address, UpgradeInfo).init(allocator);
+
+        return MovePackage{
+            .id = id,
+            .version = version,
+            .modules = modules,
+            .type_origin_table = .empty,
+            .linkage_table = linkage_table,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn addModule(self: *MovePackage, key: Identifier, value: std.ArrayList(u8)) void {
+        try self.modules.put(key, value);
+    }
+    pub fn removeModule(self: *MovePackage, key: Identifier) !void {
+        if (self.modules.fetchRemove(key)) |kv| {
+            var k = kv.key;
+            var v = kv.value;
+            k.deinit(self.allocator);
+            v.deinit(self.allocator);
+        }
+    }
+    pub fn addLinkage(self: *MovePackage, key: Address, value: UpgradeInfo) void {
+        try self.linkage_table.put(key, value);
+    }
+    pub fn removeLinkage(self: *MovePackage, key: Address) !void {
+        _ = self.linkage_table.remove(key);
+    }
+    pub fn deinit(self: *MovePackage) void {
+        var it = self.modules.iterator();
+
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.destroy(entry.value_ptr.*);
+        }
+
+        self.modules.deinit();
+
+        for (self.type_origin_table.items) |*origin| {
+            origin.deinit();
+        }
+
+        self.linkage_table.deinit();
+    }
 };
 
 pub const ObjectData = union(enum) {
@@ -314,12 +400,36 @@ pub const Object = struct {
     owner: Owner,
     previous_transaction: Digest,
     storage_rebate: u64,
+
+    pub fn new(data: ObjectData, owner: Owner, previous_transaction: Digest, storage_rebate: u64) Object {
+        return Object{
+            .data = data,
+            .owner = owner,
+            .previous_transaction = previous_transaction,
+            .storage_rebate = storage_rebate,
+        };
+    }
+
+    pub fn deinit(self: *Object) void {
+        switch (self.data) {
+            .struct_ => |*s| s.deinit(),
+            .package => |*p| p.deinit(),
+        }
+    }
 };
 
 pub const ObjectReference = struct {
     object_id: Address,
     version: Version,
     digest: Digest,
+
+    pub fn new(object_id: Address, version: Version, digest: Digest) ObjectReference {
+        return ObjectReference{
+            .object_id = object_id,
+            .version = version,
+            .digest = digest,
+        };
+    }
 };
 
 pub const Mutability = enum {
@@ -332,6 +442,14 @@ pub const SharedInput = struct {
     object_id: Address,
     version: u64,
     mutability: Mutability,
+
+    pub fn new(object_id: Address, version: u64, mutability: Mutability) SharedInput {
+        return SharedInput{
+            .object_id = object_id,
+            .version = version,
+            .mutability = mutability,
+        };
+    }
 };
 
 pub const Reservation = union(enum) {
