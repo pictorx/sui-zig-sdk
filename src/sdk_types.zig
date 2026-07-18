@@ -1,61 +1,130 @@
 const std = @import("std");
 const zroaring = @import("zroaring");
-const assert = std.debug.assert;
+const base58 = @import("base58");
 const testing = std.testing;
 
 const AddressLength: u8 = 32;
 
 pub const Address = struct {
-    // allocator: std.mem.Allocator,
     bytes: [AddressLength]u8,
 
     pub fn new() Address {
-        //const bytes: []u8 = try allocator.alloc(u8, AddressLength);
-        const bytes: [AddressLength]u8 = undefined;
-
-        return Address{
-            .bytes = bytes,
-        };
+        return Address{ .bytes = [_]u8{0} ** AddressLength };
     }
-    pub fn from_hex(self: *Address, hexStr: []const u8) !void {
-        assert(hexStr[0] == '0');
-        assert(hexStr[1] == 'x');
 
-        if (hexStr.len == 0) {
-            return AddressParseError.EmptyInput;
-        }
-        if (hexStr.len > 66) {
-            return AddressParseError.InputTooLong;
-        }
+    /// Accepts an optional "0x"/"0X" prefix and hex strings shorter than
+    /// the full 64 digits, left-zero-padding them (matches Rust's
+    /// hex_address_bytes, which decodes back-to-front into a zeroed buffer).
+    pub fn from_hex(self: *Address, hex_str: []const u8) AddressParseError!void {
+        if (hex_str.len == 0) return AddressParseError.EmptyInput;
 
-        _ = std.fmt.hexToBytes(self.bytes[0..], hexStr[2..]) catch |err| {
-            return err;
-        };
+        const hex = if (hex_str.len >= 2 and hex_str[0] == '0' and (hex_str[1] == 'x' or hex_str[1] == 'X'))
+            hex_str[2..]
+        else
+            hex_str;
+
+        if (hex.len > AddressLength * 2) return AddressParseError.InputTooLong;
+
+        self.bytes = [_]u8{0} ** AddressLength;
+
+        var i: usize = hex.len;
+        var j: usize = AddressLength;
+        while (i >= 2) {
+            const hi = hexDigit(hex[i - 2]) orelse return AddressParseError.InvalidHexCharacter;
+            const lo = hexDigit(hex[i - 1]) orelse return AddressParseError.InvalidHexCharacter;
+            j -= 1;
+            self.bytes[j] = (hi << 4) | lo;
+            i -= 2;
+        }
+        if (i == 1) {
+            const lo = hexDigit(hex[0]) orelse return AddressParseError.InvalidHexCharacter;
+            j -= 1;
+            self.bytes[j] = lo;
+        }
     }
+
     pub fn from_bytes(self: *Address, bytes: [AddressLength]u8) void {
         self.bytes = bytes;
     }
-    pub fn to_hex(self: *Address) []const u8 {
-        const hexStr = "0x" ++ std.fmt.bytesToHex(&self.bytes, .lower);
-        return hexStr;
+
+    /// buf must be at least HexEncodedLen (66) bytes.
+    pub fn to_hex(self: *const Address, buf: []u8) []const u8 {
+        const hex = std.fmt.bytesToHex(&self.bytes, .lower);
+        buf[0] = '0';
+        buf[1] = 'x';
+        @memcpy(buf[2 .. 2 + hex.len], &hex);
+        return buf[0 .. 2 + hex.len];
     }
 
-    pub fn to_bytes(self: *Address) [AddressLength]u8 {
+    pub fn to_bytes(self: *const Address) [AddressLength]u8 {
         return self.bytes;
     }
 };
 
+pub const HexEncodedLen: usize = 2 + @as(usize, AddressLength) * 2;
+
+fn hexDigit(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
+}
+
 pub const AddressParseError = error{ EmptyInput, InputTooLong, InvalidHexCharacter };
 
-pub const ByteString = []u8;
+pub const ByteString = []const u8;
 pub const Identifier = struct {
     bytestring: ByteString,
+
+    pub fn init(allocator: std.mem.Allocator, size: usize) !Identifier {
+        return .{
+            .bytestring = try allocator.alloc(u8, size),
+        };
+    }
+
+    pub fn init_from_str(allocator: std.mem.Allocator, str: []const u8) !Identifier {
+        return .{
+            .bytestring = try allocator.dupe(u8, str),
+        };
+    }
+
+    pub fn deinit(self: *Identifier, allocator: std.mem.Allocator) void {
+        allocator.free(self.bytestring);
+    }
+
+    pub fn as_str(self: *const Identifier) []const u8 {
+        return self.bytestring;
+    }
 };
 
 const DigestLength: u8 = 32;
 
 pub const Digest = struct {
     bytes: [DigestLength]u8,
+
+    pub fn as_slice(self: *const Digest) []const u8 {
+        return &self.bytes;
+    }
+
+    pub fn from_base58(src: []const u8) DigestParseError!Digest {
+        var dec_buf: [DigestLength]u8 = undefined;
+        const decoded = try base58.decode32(&dec_buf, src);
+        return Digest{
+            .bytes = decoded[0..DigestLength].*,
+        };
+    }
+
+    /// buf must be at least base58.encodedMaxLen(DigestLength) bytes.
+    pub fn to_base58(self: *const Digest, buf: []u8) DigestParseError![]const u8 {
+        return base58.encode(buf, &self.bytes);
+    }
+
+    pub fn from_bytes(bytes: []const u8) DigestParseError!Digest {
+        if (bytes.len != DigestLength) return DigestParseError.InvalidLength;
+        return Digest{ .bytes = bytes[0..DigestLength].* };
+    }
 };
 
 pub const GasCostSummary = struct {
@@ -63,6 +132,16 @@ pub const GasCostSummary = struct {
     storage_cost: u64,
     storage_rebate: u64,
     non_refundable_storage_fee: u64,
+
+    pub fn gas_used(self: *const GasCostSummary) u64 {
+        return self.computation_cost + self.storage_cost;
+    }
+
+    pub fn net_gas_usage(self: *const GasCostSummary) i64 {
+        const used: i64 = @intCast(self.gas_used());
+        const rebate: i64 = @intCast(self.storage_rebate);
+        return used - rebate;
+    }
 };
 
 pub const Version = u64;
@@ -79,6 +158,56 @@ pub const TypeTag = union(enum) {
     signer,
     vector: *TypeTag,
     struct_: *StructTag,
+
+    pub fn to_string(self: *const TypeTag) []const u8 {
+        return switch (self.*) {
+            .u8 => "u8",
+            .u16 => "u16",
+            .u32 => "u32",
+            .u64 => "u64",
+            .u128 => "u128",
+            .u256 => "u256",
+            .bool => "bool",
+            .address => "address",
+            .signer => "signer",
+            .vector => "vector",
+            .struct_ => "struct",
+        };
+    }
+
+    pub fn to_string_alloc(self: *const TypeTag, allocator: std.mem.Allocator) ![]u8 {
+        return switch (self.*) {
+            .u8 => allocator.dupe(u8, "u8"),
+            .u16 => allocator.dupe(u8, "u16"),
+            .u32 => allocator.dupe(u8, "u32"),
+            .u64 => allocator.dupe(u8, "u64"),
+            .u128 => allocator.dupe(u8, "u128"),
+            .u256 => allocator.dupe(u8, "u256"),
+            .bool => allocator.dupe(u8, "bool"),
+            .address => allocator.dupe(u8, "address"),
+            .signer => allocator.dupe(u8, "signer"),
+            .vector => |inner| blk: {
+                const inner_str = try inner.to_string_alloc(allocator);
+                defer allocator.free(inner_str);
+                break :blk std.fmt.allocPrint(allocator, "vector<{s}>", .{inner_str});
+            },
+            .struct_ => |tag| std.fmt.allocPrint(allocator, "{s}::{s}", .{ tag.module.as_str(), tag.name.as_str() }),
+        };
+    }
+
+    pub fn deinit(self: *TypeTag, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .vector => |inner| {
+                inner.deinit(allocator);
+                allocator.destroy(inner);
+            },
+            .struct_ => |tag| {
+                tag.deinit();
+                allocator.destroy(tag);
+            },
+            else => {},
+        }
+    }
 };
 
 pub const StructTag = struct {
@@ -86,6 +215,45 @@ pub const StructTag = struct {
     module: Identifier,
     name: Identifier,
     typeParams: std.ArrayList(TypeTag),
+    allocator: std.mem.Allocator,
+
+    pub fn init(address: Address, module: Identifier, name: Identifier, allocator: std.mem.Allocator) StructTag {
+        return StructTag{
+            .address = address,
+            .module = module,
+            .name = name,
+            .typeParams = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn add(self: *StructTag, item: TypeTag) !void {
+        try self.typeParams.append(self.allocator, item);
+    }
+
+    pub fn addMany(self: *StructTag, items: []const TypeTag) !void {
+        try self.typeParams.appendSlice(self.allocator, items);
+    }
+
+    pub fn sui(allocator: std.mem.Allocator) !StructTag {
+        var address = Address.new();
+        try address.from_hex("0x0000000000000000000000000000000000000000000000000000000000000002");
+        const module = try Identifier.init_from_str(allocator, "sui");
+        const name = try Identifier.init_from_str(allocator, "SUI");
+
+        return StructTag.init(
+            address,
+            module,
+            name,
+            allocator,
+        );
+    }
+
+    pub fn deinit(self: *StructTag) void {
+        self.typeParams.deinit(self.allocator);
+        self.module.deinit(self.allocator);
+        self.name.deinit(self.allocator);
+    }
 };
 
 pub const MoveStruct = struct {
@@ -925,9 +1093,7 @@ pub const Intent = struct {
 };
 
 pub const InvalidZkLoginAuthenticatorError = []const u8;
-pub const DigestParseError = struct {
-    bs58_error: ?[]const u8,
-};
+pub const DigestParseError = base58.Base58Error || error{InvalidLength};
 pub const SigningDigest = [32]u8;
 
 pub const SignedTransactionWithIntentMessage = struct {};
@@ -1022,8 +1188,43 @@ test "Address" {
     const a = "0x0000000000000000000000000000000000000000000000000000000000000002";
     try address.from_hex(a);
     try testing.expect(address.bytes.len == AddressLength);
-    const b = address.to_hex();
-    try testing.expectEqualStrings(b, a);
+    var hex_buf: [HexEncodedLen]u8 = undefined;
+    const b = address.to_hex(&hex_buf);
+    try testing.expectEqualStrings(a, b);
 }
 
+test "Identifier" {
+    const testingAlloc = testing.allocator;
+    var identifier = try Identifier.init(testingAlloc, 32);
+    defer identifier.deinit(testingAlloc);
+    try testing.expectEqual(@as(usize, 32), identifier.bytestring.len);
+
+    const str = "Hello";
+    var identifier_str = try Identifier.init_from_str(testingAlloc, str);
+    defer identifier_str.deinit(testingAlloc);
+    try testing.expectEqual(@as(usize, str.len), identifier_str.bytestring.len);
+
+    try testing.expectEqualStrings(str, identifier_str.as_str());
+}
+
+test "Digest" {
+    const digestStr = "BibaSN532CJH8vLJVcaDp7bQkG6S5K2gRvMKGJjisr6M";
+    const digest = try Digest.from_base58(digestStr);
+
+    var encode_buf: [base58.encodedMaxLen(DigestLength)]u8 = undefined;
+    const encoded = try digest.to_base58(&encode_buf);
+
+    try testing.expectEqualStrings(digestStr, encoded);
+}
+
+test "GasCostSummary" {
+    const gas_cost = GasCostSummary{
+        .computation_cost = 100,
+        .non_refundable_storage_fee = 20,
+        .storage_cost = 5,
+        .storage_rebate = 4,
+    };
+
+    try testing.expect(gas_cost.gas_used() == 105);
+}
 // pub const HexDecodeError = enum([]u8) { EmptyInput = "input hex string must be non-empty", InputTooLong = "input hex string is too long for address", InvalidHexCharacter = "input hex string has wrong character" };

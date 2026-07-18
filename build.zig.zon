@@ -36,6 +36,10 @@
             .url = "git+https://codeberg.org/archaistvolts/zroaring#42f39e07b4cc1af4fe3e759d0d35363a7464f70b",
             .hash = "zroaring-0.0.1-hM66q812HgAawX6r93jXStl2-Efebkf3zBCH_UXdJA6j",
         },
+        .base58 = .{
+            .url = "git+https://github.com/pictorx/sui-zig-base58.git#03c6cecf39d999de7f67f4a530fe025381c8922c",
+            .hash = "base58-0.0.0-N---Gg92AACUX5KgDqm2ojpGCABnvRA5bB8agrQ40qEa",
+        },
     },
     .paths = .{
         "build.zig",

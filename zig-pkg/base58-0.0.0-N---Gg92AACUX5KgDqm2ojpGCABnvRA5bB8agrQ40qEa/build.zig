@@ -13,13 +13,9 @@ pub fn build(b: *std.Build) void {
     // for restricting supported target set are available.
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    // It's also possible to define more custom flags to toggle optional features
-    // of this build script using `b.option()`. All defined flags (including
-    // target and optimize options) will be listed when running `zig build --help`
-    // in this directory.
-
-    const zroaring_dep = b.dependency("zroaring", .{ .target = target, .optimize = optimize });
-    const base58_dep = b.dependency("base58", .{ .target = target, .optimize = optimize });
+    // Standard optimization options allow the person running `zig build` to select
+    // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
+    // set a preferred release mode, allowing the user to decide how to optimize.
 
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
@@ -28,36 +24,35 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
-    const sdk_types = b.addModule("sdk_types", .{
+    const mod = b.addModule("base58", .{
         // The root source file is the "entry point" of this module. Users of
         // this module will only be able to access public declarations contained
         // in this file, which means that if you have declarations that you
         // intend to expose to consumers that were defined in other files part
         // of this module, you will have to make sure to re-export them from
         // the root file.
-        .root_source_file = b.path("src/sdk_types.zig"),
+        .root_source_file = b.path("src/root.zig"),
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
+        .optimize = optimize,
     });
 
-    sdk_types.addImport("zroaring", zroaring_dep.module("zroaring"));
-    sdk_types.addImport("base58", base58_dep.module("base58"));
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
-    const sdk_types_tests = b.addTest(.{
-        .root_module = sdk_types,
+    const mod_tests = b.addTest(.{
+        .root_module = mod,
     });
 
     // A run step that will run the test executable.
-    const run_sdk_types_tests = b.addRunArtifact(sdk_types_tests);
+    const run_mod_tests = b.addRunArtifact(mod_tests);
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_sdk_types_tests.step);
+    test_step.dependOn(&run_mod_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
