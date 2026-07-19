@@ -90,6 +90,10 @@ pub const Identifier = struct {
         };
     }
 
+    pub fn clone(self: *const Identifier, allocator: std.mem.Allocator) !Identifier {
+        return .{ .bytestring = try allocator.dupe(u8, self.bytestring) };
+    }
+
     pub fn deinit(self: *Identifier, allocator: std.mem.Allocator) void {
         allocator.free(self.bytestring);
     }
@@ -195,6 +199,24 @@ pub const TypeTag = union(enum) {
         };
     }
 
+    pub fn clone(self: *const TypeTag, allocator: std.mem.Allocator) !TypeTag {
+        return switch (self.*) {
+            .u8, .u16, .u32, .u64, .u128, .u256, .bool, .address, .signer => self.*,
+            .vector => |inner| blk: {
+                const cloned_inner = try allocator.create(TypeTag);
+                errdefer allocator.destroy(cloned_inner);
+                cloned_inner.* = try inner.clone(allocator);
+                break :blk TypeTag{ .vector = cloned_inner };
+            },
+            .struct_ => |tag| blk: {
+                const cloned_tag = try allocator.create(StructTag);
+                errdefer allocator.destroy(cloned_tag);
+                cloned_tag.* = try tag.clone(allocator);
+                break :blk TypeTag{ .struct_ = cloned_tag };
+            },
+        };
+    }
+
     pub fn deinit(self: *TypeTag, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .vector => |inner| {
@@ -233,6 +255,33 @@ pub const StructTag = struct {
 
     pub fn addMany(self: *StructTag, items: []const TypeTag) !void {
         try self.typeParams.appendSlice(self.allocator, items);
+    }
+
+    pub fn clone(self: *const StructTag, allocator: std.mem.Allocator) !StructTag {
+        var cloned_module = try self.module.clone(allocator);
+        errdefer cloned_module.deinit(allocator);
+
+        var cloned_name = try self.name.clone(allocator);
+        errdefer cloned_name.deinit(allocator);
+
+        var cloned_params: std.ArrayList(TypeTag) = .empty;
+        errdefer {
+            for (cloned_params.items) |*p| p.deinit(allocator);
+            cloned_params.deinit(allocator);
+        }
+        for (self.typeParams.items) |param| {
+            var cloned_param = try param.clone(allocator);
+            errdefer cloned_param.deinit(allocator);
+            try cloned_params.append(allocator, cloned_param);
+        }
+
+        return StructTag{
+            .address = self.address,
+            .module = cloned_module,
+            .name = cloned_name,
+            .typeParams = cloned_params,
+            .allocator = allocator,
+        };
     }
 
     pub fn sui(allocator: std.mem.Allocator) !StructTag {
@@ -374,6 +423,7 @@ pub const MovePackage = struct {
         for (self.type_origin_table.items) |*origin| {
             origin.deinit();
         }
+        self.type_origin_table.deinit(self.allocator);
 
         self.linkage_table.deinit();
     }
@@ -467,6 +517,34 @@ pub const FundsWithdrawal = struct {
     reservation: Reservation,
     type_: WithdrawalType,
     source: WithdrawFrom,
+    allocator: std.mem.Allocator,
+
+    pub fn init(amount_: u64, coin_type_: TypeTag, source: WithdrawFrom, allocator: std.mem.Allocator) FundsWithdrawal {
+        return FundsWithdrawal{
+            .reservation = .{ .Amount = amount_ },
+            .type_ = .{ .Balance = coin_type_ },
+            .source = source,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn amount(self: *const FundsWithdrawal) ?u64 {
+        return switch (self.reservation) {
+            .Amount => |amt| amt,
+        };
+    }
+
+    pub fn coin_type(self: *const FundsWithdrawal) TypeTag {
+        return switch (self.type_) {
+            .Balance => |*t| t,
+        };
+    }
+
+    pub fn deinit(self: *FundsWithdrawal) void {
+        switch (self.type_) {
+            .Balance => |*t| t.deinit(self.allocator),
+        }
+    }
 };
 
 pub const Argument = union(enum) {
@@ -474,6 +552,13 @@ pub const Argument = union(enum) {
     Input: u16,
     Result: u16,
     NestedResult: struct { a: u16, b: u16 },
+
+    pub fn nested(self: *const Argument, ix: u16) ?Argument {
+        return switch (self.*) {
+            .Result => |i| Argument{ .NestedResult = .{ .a = i, .b = ix } },
+            else => null,
+        };
+    }
 };
 
 pub const MoveCall = struct {
@@ -482,37 +567,148 @@ pub const MoveCall = struct {
     function: Identifier,
     type_arguments: std.ArrayList(TypeTag),
     arguments: std.ArrayList(Argument),
+    allocator: std.mem.Allocator,
+
+    pub fn init(package: Address, module: Identifier, function: Identifier, allocator: std.mem.Allocator) MoveCall {
+        return MoveCall{
+            .package = package,
+            .module = module,
+            .function = function,
+            .type_arguments = .empty,
+            .arguments = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *MoveCall) void {
+        self.module.deinit(self.allocator);
+        self.function.deinit(self.allocator);
+        for (self.type_arguments.items) |*value| {
+            value.deinit(self.allocator);
+        }
+        self.type_arguments.deinit(self.allocator);
+        self.arguments.deinit(self.allocator);
+    }
 };
 
 pub const TransferObjects = struct {
     objects: std.ArrayList(Argument),
     address: Argument,
+    allocator: std.mem.Allocator,
+
+    pub fn init(address: Argument, allocator: std.mem.Allocator) TransferObjects {
+        return TransferObjects{
+            .address = address,
+            .objects = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *TransferObjects) void {
+        self.objects.deinit(self.allocator);
+    }
 };
 
 pub const SplitCoins = struct {
     coin: Argument,
     amounts: std.ArrayList(Argument),
+    allocator: std.mem.Allocator,
+
+    pub fn init(coin: Argument, allocator: std.mem.Allocator) SplitCoins {
+        return SplitCoins{
+            .coin = coin,
+            .amounts = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *SplitCoins) void {
+        self.amounts.deinit(self.allocator);
+    }
 };
 
 pub const MergeCoins = struct {
     coin: Argument,
     coins_to_merge: std.ArrayList(Argument),
+    allocator: std.mem.Allocator,
+
+    pub fn init(coin: Argument, allocator: std.mem.Allocator) MergeCoins {
+        return MergeCoins{
+            .coin = coin,
+            .coins_to_merge = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *MergeCoins) void {
+        self.coins_to_merge.deinit(self.allocator);
+    }
 };
 
 pub const Publish = struct {
     modules: std.ArrayList(std.ArrayList(u8)),
     dependencies: std.ArrayList(Address),
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) Publish {
+        return Publish{
+            .modules = .empty,
+            .dependencies = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Publish) void {
+        for (self.modules.items) |*module| {
+            module.deinit(self.allocator);
+        }
+        self.modules.deinit(self.allocator);
+        self.dependencies.deinit(self.allocator);
+    }
 };
 
 pub const MakeMoveVector = struct {
     type_: ?TypeTag,
     elements: std.ArrayList(Argument),
+    allocator: std.mem.Allocator,
+
+    pub fn init(type_: ?TypeTag, allocator: std.mem.Allocator) MakeMoveVector {
+        return MakeMoveVector{
+            .type_ = type_,
+            .elements = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *MakeMoveVector) void {
+        if (self.type_) |*t| {
+            t.deinit(self.allocator);
+        }
+        self.elements.deinit(self.allocator);
+    }
 };
 
 pub const Upgrade = struct {
     modules: std.ArrayList(std.ArrayList(u8)),
     package: Address,
     ticket: Argument,
+    allocator: std.mem.Allocator,
+
+    pub fn init(package: Address, ticket: Argument, allocator: std.mem.Allocator) Upgrade {
+        return Upgrade{
+            .modules = .empty,
+            .package = package,
+            .ticket = ticket,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Upgrade) void {
+        for (self.modules.items) |*module| {
+            module.deinit(self.allocator);
+        }
+        self.modules.deinit(self.allocator);
+    }
 };
 
 pub const Command = union(enum) {
@@ -536,6 +732,39 @@ pub const Input = union(enum) {
 pub const ProgrammableTransaction = struct {
     inputs: std.ArrayList(Input),
     commands: std.ArrayList(Command),
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) ProgrammableTransaction {
+        return ProgrammableTransaction{
+            .inputs = .empty,
+            .commands = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *ProgrammableTransaction) void {
+        for (self.inputs.items) |*input| {
+            switch (input.*) {
+                .Pure => |*i| i.deinit(self.allocator),
+                .FundsWithdrawal => |*k| k.deinit(),
+                .ImmutableOrOwned, .Shared, .Receiving => {},
+            }
+        }
+        self.inputs.deinit(self.allocator);
+
+        for (self.commands.items) |*command| {
+            switch (command.*) {
+                .MoveCall => |*c| c.deinit(),
+                .TransferObjects => |*t| t.deinit(),
+                .SplitCoins => |*s| s.deinit(),
+                .MergeCoins => |*m| m.deinit(),
+                .Publish => |*p| p.deinit(),
+                .MakeMoveVector => |*mm| mm.deinit(),
+                .Upgrade => |*u| u.deinit(),
+            }
+        }
+        self.commands.deinit(self.allocator);
+    }
 };
 
 pub const EpochId = u64;
@@ -544,7 +773,25 @@ pub const ProtocolVersion = u64;
 pub const SystemPackage = struct {
     version: Version,
     modules: std.ArrayList(std.ArrayList(u8)),
-    dependecies: std.ArrayList(Address),
+    dependencies: std.ArrayList(Address),
+    allocator: std.mem.Allocator,
+
+    pub fn init(version: Version, allocator: std.mem.Allocator) SystemPackage {
+        return SystemPackage{
+            .version = version,
+            .modules = .empty,
+            .dependencies = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *SystemPackage) void {
+        for (self.modules.items) |*module| {
+            module.deinit(self.allocator);
+        }
+        self.modules.deinit(self.allocator);
+        self.dependencies.deinit(self.allocator);
+    }
 };
 
 pub const ChangeEpoch = struct {
@@ -552,18 +799,98 @@ pub const ChangeEpoch = struct {
     protocol_version: ProtocolVersion,
     storage_charge: u64,
     computation_charge: u64,
+    storage_rebate: u64,
     non_refundable_storage: u64,
     epoch_start_timestamp_ms: u64,
     system_packages: std.ArrayList(SystemPackage),
+    allocator: std.mem.Allocator,
+
+    pub fn init(epoch: EpochId, protocol_version: ProtocolVersion, storage_charge: u64, computation_charge: u64, storage_rebate: u64, non_refundable_storage: u64, epoch_start_timestamp_ms: u64, allocator: std.mem.Allocator) ChangeEpoch {
+        return ChangeEpoch{
+            .epoch = epoch,
+            .protocol_version = protocol_version,
+            .storage_charge = storage_charge,
+            .computation_charge = computation_charge,
+            .storage_rebate = storage_rebate,
+            .non_refundable_storage = non_refundable_storage,
+            .epoch_start_timestamp_ms = epoch_start_timestamp_ms,
+            .system_packages = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *ChangeEpoch) void {
+        for (self.system_packages.items) |*system_package| {
+            system_package.deinit();
+        }
+        self.system_packages.deinit(self.allocator);
+    }
 };
+
+fn id_opt(contents: []const u8) ?Address {
+    if (contents.len < AddressLength) return null;
+    var addr = Address.new();
+    addr.from_bytes(contents[0..AddressLength].*);
+    return addr;
+}
 
 pub const GenesisObject = struct {
     data: ObjectData,
     owner: Owner,
+
+    pub fn init(data: ObjectData, owner: Owner) GenesisObject {
+        return GenesisObject{
+            .data = data,
+            .owner = owner,
+        };
+    }
+
+    pub fn object_id(self: *const GenesisObject) Address {
+        return switch (self.data) {
+            .struct_ => |s| id_opt(s.contents.items) orelse @panic("object contents missing id"),
+            .package => |p| p.id,
+        };
+    }
+
+    pub fn version(self: *const GenesisObject) Version {
+        return switch (self.data) {
+            .struct_ => |s| s.version,
+            .package => |p| p.version,
+        };
+    }
+
+    pub fn object_type(self: *const GenesisObject) !ObjectType {
+        return switch (self.data) {
+            .struct_ => |s| ObjectType{ .Struct = try s.type_.clone(s.allocator) },
+            .package => ObjectType{ .Package = {} },
+        };
+    }
+
+    pub fn deinit(self: *GenesisObject) void {
+        switch (self.data) {
+            .struct_ => |*s| s.deinit(),
+            .package => |*p| p.deinit(),
+        }
+    }
 };
 
 pub const GenesisTransaction = struct {
     objects: std.ArrayList(GenesisObject),
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) GenesisTransaction {
+        return GenesisTransaction{
+            .objects = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *GenesisTransaction) void {
+        for (self.objects.items) |*object| {
+            object.deinit();
+        }
+        self.objects.deinit(self.allocator);
+    }
 };
 
 pub const CheckpointTimestamp = u64;
@@ -571,11 +898,32 @@ pub const ConsensusCommitPrologue = struct {
     epoch: u64,
     round: u64,
     commit_timestamp_ms: CheckpointTimestamp,
+
+    pub fn new(epoch: u64, round: u64, commit_timestamp_ms: CheckpointTimestamp) ConsensusCommitPrologue {
+        return ConsensusCommitPrologue{
+            .epoch = epoch,
+            .round = round,
+            .commit_timestamp_ms = commit_timestamp_ms,
+        };
+    }
 };
 
 pub const JwkId = struct {
     iss: []const u8,
     kid: []const u8,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, iss: []const u8, kid: []const u8) !JwkId {
+        const iss_copy = try allocator.dupe(u8, iss);
+        errdefer allocator.free(iss_copy);
+        const kid_copy = try allocator.dupe(u8, kid);
+        return JwkId{ .iss = iss_copy, .kid = kid_copy, .allocator = allocator };
+    }
+
+    pub fn deinit(self: *JwkId) void {
+        self.allocator.free(self.iss);
+        self.allocator.free(self.kid);
+    }
 };
 
 pub const Jwk = struct {
@@ -583,12 +931,40 @@ pub const Jwk = struct {
     e: []const u8,
     n: []const u8,
     alg: []const u8,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, kty: []const u8, e: []const u8, n: []const u8, alg: []const u8) !Jwk {
+        const kty_c = try allocator.dupe(u8, kty);
+        errdefer allocator.free(kty_c);
+        const e_c = try allocator.dupe(u8, e);
+        errdefer allocator.free(e_c);
+        const n_c = try allocator.dupe(u8, n);
+        errdefer allocator.free(n_c);
+        const alg_c = try allocator.dupe(u8, alg);
+        return Jwk{ .kty = kty_c, .e = e_c, .n = n_c, .alg = alg_c, .allocator = allocator };
+    }
+
+    pub fn deinit(self: *Jwk) void {
+        self.allocator.free(self.kty);
+        self.allocator.free(self.e);
+        self.allocator.free(self.n);
+        self.allocator.free(self.alg);
+    }
 };
 
 pub const ActiveJwk = struct {
     jwk_id: JwkId,
     jwk: Jwk,
     epoch: u64,
+
+    pub fn init(jwk_id: JwkId, jwk: Jwk, epoch: u64) ActiveJwk {
+        return ActiveJwk{ .jwk_id = jwk_id, .jwk = jwk, .epoch = epoch };
+    }
+
+    pub fn deinit(self: *ActiveJwk) void {
+        self.jwk_id.deinit();
+        self.jwk.deinit();
+    }
 };
 
 pub const AuthenticatorStateUpdate = struct {
@@ -596,20 +972,58 @@ pub const AuthenticatorStateUpdate = struct {
     round: u64,
     new_active_jwks: std.ArrayList(ActiveJwk),
     authenticator_obj_initial_shared_version: u64,
+    allocator: std.mem.Allocator,
+
+    pub fn init(epoch: u64, round: u64, authenticator_obj_initial_shared_version: u64, allocator: std.mem.Allocator) AuthenticatorStateUpdate {
+        return AuthenticatorStateUpdate{
+            .epoch = epoch,
+            .round = round,
+            .new_active_jwks = .empty,
+            .authenticator_obj_initial_shared_version = authenticator_obj_initial_shared_version,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *AuthenticatorStateUpdate) void {
+        for (self.new_active_jwks.items) |*jwk| {
+            jwk.deinit();
+        }
+        self.new_active_jwks.deinit(self.allocator);
+    }
 };
 
-pub const AuthenticatorStateExpired = struct {
+pub const AuthenticatorStateExpire = struct {
     min_epoch: u64,
     authenticator_object_initial_shared_version: u64,
+
+    pub fn new(min_epoch: u64, authenticator_object_initial_shared_version: u64) AuthenticatorStateExpire {
+        return AuthenticatorStateExpire{
+            .min_epoch = min_epoch,
+            .authenticator_object_initial_shared_version = authenticator_object_initial_shared_version,
+        };
+    }
 };
 
 pub const ExecutionTimeObservationKey = union(enum) {
-    MoveEntryPoint: struct {
-        package: Address,
-        module: []const u8,
-        function: []const u8,
-        type_arguments: std.ArrayList(TypeTag),
-    },
+    MoveEntryPoint: struct { package: Address, module: []const u8, function: []const u8, type_arguments: std.ArrayList(TypeTag), allocator: std.mem.Allocator },
+    TransferObjects: TransferObjects,
+    SplitCoins: SplitCoins,
+    MergeCoins: MergeCoins,
+    Publish: Publish,
+    MakeMoveVec: MakeMoveVector,
+    Upgrade: Upgrade,
+
+    pub fn deinit(self: *ExecutionTimeObservationKey) void {
+        switch (self.*) {
+            .MoveEntryPoint => |*m| {
+                m.allocator.free(m.module);
+                m.allocator.free(m.function);
+                for (m.type_arguments.items) |*t| t.deinit(m.allocator);
+                m.type_arguments.deinit(m.allocator);
+            },
+            .TransferObjects, .SplitCoins, .MergeCoins, .Publish, .MakeMoveVec, .Upgrade => {},
+        }
+    }
 };
 
 pub const Bls12381PublicKey = [96]u8;
@@ -617,16 +1031,36 @@ pub const Bls12381PublicKey = [96]u8;
 pub const ValidatorExecutionTimeObservation = struct {
     validator: Bls12381PublicKey,
     duration: std.Io.Duration,
+
+    pub fn new(validator: Bls12381PublicKey, duration: std.Io.Duration) ValidatorExecutionTimeObservation {
+        return ValidatorExecutionTimeObservation{
+            .validator = validator,
+            .duration = duration,
+        };
+    }
 };
 
 pub const ExecutionTimeObservations = union(enum) {
     V1: std.ArrayList(struct { ExecutionTimeObservationKey, std.ArrayList(ValidatorExecutionTimeObservation) }),
+
+    pub fn deinit(self: *ExecutionTimeObservations, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .V1 => |*v1| {
+                for (v1.items) |*value| {
+                    value.@"0".deinit();
+                    value.@"1".deinit(allocator);
+                }
+                v1.deinit(allocator);
+            },
+            else => {},
+        }
+    }
 };
 
 pub const EndOfEpochTransactionKind = union(enum) {
     ChangeEpoch: ChangeEpoch,
     AuthenticatorStateCreator,
-    AuthenticatorStateExpired: AuthenticatorStateExpired,
+    AuthenticatorStateExpire: AuthenticatorStateExpire,
     RandomnessStateCreate,
     DenyListStateCreate,
     BridgeStateCreate: struct { chain_id: Digest },
@@ -637,13 +1071,30 @@ pub const EndOfEpochTransactionKind = union(enum) {
     DisplayRegistryCreate,
     AddressAliasStateCreate,
     WriteAccumulatorStorageCost: struct { storage_cost: u64 },
+
+    pub fn deinit(self: *EndOfEpochTransactionKind, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .ChangeEpoch => |*c| c.deinit(),
+            .StoreExecutionTimeObservations => |*s| s.deinit(allocator),
+            else => {},
+        }
+    }
 };
 
 pub const RandomnessStateUpdate = struct {
     epoch: u64,
-    randomness: u64,
+    randomness_round: u64,
     random_bytes: std.ArrayList(u8),
     randomness_obj_initial_shared_version: u64,
+    allocator: std.mem.Allocator,
+
+    pub fn init(epoch: u64, randomness_round: u64, randomness_obj_initial_shared_version: u64, allocator: std.mem.Allocator) RandomnessStateUpdate {
+        return RandomnessStateUpdate{ .epoch = epoch, .randomness_round = randomness_round, .random_bytes = .empty, .randomness_obj_initial_shared_version = randomness_obj_initial_shared_version, .allocator = allocator };
+    }
+
+    pub fn deinit(self: *RandomnessStateUpdate) void {
+        self.random_bytes.deinit(self.allocator);
+    }
 };
 
 pub const ConsensusCommitPrologueV2 = struct {
@@ -651,28 +1102,90 @@ pub const ConsensusCommitPrologueV2 = struct {
     round: u64,
     commit_timestamp_ms: CheckpointTimestamp,
     consensus_commit_digest: Digest,
+
+    pub fn new(epoch: u64, round: u64, commit_timestamp_ms: CheckpointTimestamp, consensus_commit_digest: Digest) ConsensusCommitPrologueV2 {
+        return ConsensusCommitPrologueV2{ .epoch = epoch, .round = round, .commit_timestamp_ms = commit_timestamp_ms, .consensus_commit_digest = consensus_commit_digest };
+    }
 };
 pub const VersionAssignment = struct {
     object_id: Address,
     version: Version,
+
+    pub fn new(object_id: Address, version: Version) VersionAssignment {
+        return VersionAssignment{
+            .object_id = object_id,
+            .version = version,
+        };
+    }
 };
 pub const CanceledTransaction = struct {
     digest: Digest,
-    vector_assignements: std.ArrayList(VersionAssignment),
+    vector_assignments: std.ArrayList(VersionAssignment),
+    allocator: std.mem.Allocator,
+
+    pub fn init(digest: Digest, allocator: std.mem.Allocator) CanceledTransaction {
+        return CanceledTransaction{
+            .digest = digest,
+            .vector_assignments = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *CanceledTransaction) void {
+        self.vector_assignments.deinit(self.allocator);
+    }
 };
 pub const VersionAssignmentV2 = struct {
     object_id: Address,
     start_version: Version,
     version: Version,
+
+    pub fn new(object_id: Address, start_version: Version, version: Version) VersionAssignmentV2 {
+        return VersionAssignmentV2{
+            .object_id = object_id,
+            .start_version = start_version,
+            .version = version,
+        };
+    }
 };
 pub const CanceledTransactionV2 = struct {
     digest: Digest,
-    vector_assignements: std.ArrayList(VersionAssignmentV2),
+    vector_assignments: std.ArrayList(VersionAssignmentV2),
+    allocator: std.mem.Allocator,
+
+    pub fn init(digest: Digest, allocator: std.mem.Allocator) CanceledTransactionV2 {
+        return CanceledTransactionV2{
+            .digest = digest,
+            .vector_assignments = .empty,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *CanceledTransactionV2) void {
+        self.vector_assignments.deinit(self.allocator);
+    }
 };
 
 pub const ConsensusDeterminedVersionAssignments = union(enum) {
     CanceledTransactions: struct { canceled_transactions: std.ArrayList(CanceledTransaction) },
     CanceledTransactionsV2: struct { canceled_transactions: std.ArrayList(CanceledTransactionV2) },
+
+    pub fn deinit(self: *ConsensusDeterminedVersionAssignments, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .CanceledTransactions => |*c| {
+                for (c.canceled_transactions.items) |*value| {
+                    value.deinit();
+                }
+                c.canceled_transactions.deinit(allocator);
+            },
+            .CanceledTransactionsV2 => |*c| {
+                for (c.canceled_transactions.items) |*value| {
+                    value.deinit();
+                }
+                c.canceled_transactions.deinit(allocator);
+            },
+        }
+    }
 };
 pub const ConsensusCommitPrologueV3 = struct {
     epoch: u64,
@@ -681,7 +1194,25 @@ pub const ConsensusCommitPrologueV3 = struct {
     commit_timestamp_ms: CheckpointTimestamp,
     consensus_commit_digest: Digest,
     consensus_determined_version_assignments: ConsensusDeterminedVersionAssignments,
+    allocator: std.mem.Allocator,
+
+    pub fn init(epoch: u64, round: u64, sub_dag_index: ?u64, commit_timestamp_ms: CheckpointTimestamp, consensus_commit_digest: Digest, consensus_determined_version_assignments: ConsensusDeterminedVersionAssignments, allocator: std.mem.Allocator) ConsensusCommitPrologueV3 {
+        return ConsensusCommitPrologueV3{
+            .epoch = epoch,
+            .round = round,
+            .sub_dag_index = sub_dag_index,
+            .commit_timestamp_ms = commit_timestamp_ms,
+            .consensus_commit_digest = consensus_commit_digest,
+            .consensus_determined_version_assignments = consensus_determined_version_assignments,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *ConsensusCommitPrologueV3) void {
+        self.consensus_determined_version_assignments.deinit(self.allocator);
+    }
 };
+
 pub const ConsensusCommitPrologueV4 = struct {
     epoch: u64,
     round: u64,
@@ -690,6 +1221,24 @@ pub const ConsensusCommitPrologueV4 = struct {
     consensus_commit_digest: Digest,
     consensus_determined_version_assignments: ConsensusDeterminedVersionAssignments,
     additional_state_digest: Digest,
+    allocator: std.mem.Allocator,
+
+    pub fn init(epoch: u64, round: u64, sub_dag_index: ?u64, commit_timestamp_ms: CheckpointTimestamp, consensus_commit_digest: Digest, consensus_determined_version_assignments: ConsensusDeterminedVersionAssignments, additional_state_digest: Digest, allocator: std.mem.Allocator) ConsensusCommitPrologueV4 {
+        return ConsensusCommitPrologueV4{
+            .epoch = epoch,
+            .round = round,
+            .sub_dag_index = sub_dag_index,
+            .commit_timestamp_ms = commit_timestamp_ms,
+            .consensus_commit_digest = consensus_commit_digest,
+            .consensus_determined_version_assignments = consensus_determined_version_assignments,
+            .additional_state_digest = additional_state_digest,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *ConsensusCommitPrologueV4) void {
+        self.consensus_determined_version_assignments.deinit(self.allocator);
+    }
 };
 
 pub const TransactionKind = union(enum) {
@@ -1219,6 +1768,13 @@ pub const SignedTransactionWithIntentMessage = struct {};
 pub const ObjectType = union(enum) {
     Package,
     Struct: StructTag,
+
+    pub fn deinit(self: *ObjectType) void {
+        switch (self.*) {
+            .Struct => |*s| s.deinit(),
+            .Package => {},
+        }
+    }
 };
 
 pub const PersonalMessage = std.ArrayList(u8);
